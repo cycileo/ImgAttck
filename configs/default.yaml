@@ -9,6 +9,7 @@ model:
 prompt:
   text: "Describe the image."
   add_generation_prompt: true
+  enable_thinking: false
 
 image:
   height: 224

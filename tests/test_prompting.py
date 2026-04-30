@@ -24,3 +24,19 @@ def test_manual_prompt_inputs_marks_image_tokens():
 
     assert inputs["image_grid_thw"].tolist() == [[1, 14, 14]]
     assert int(inputs["mm_token_type_ids"].sum()) == spec.num_image_tokens
+
+
+def test_manual_prompt_can_disable_reasoning_prefix():
+    class RecordingTokenizer(FakeTokenizer):
+        text = ""
+
+        def __call__(self, text, return_tensors, add_special_tokens):
+            self.text = text
+            return super().__call__(text, return_tensors, add_special_tokens)
+
+    tokenizer = RecordingTokenizer()
+    spec = QwenImageSpec(height=224, width=224, patch_size=16, temporal_patch_size=2, merge_size=2)
+
+    manual_prompt_inputs(tokenizer, "Describe.", spec, enable_thinking=False)
+
+    assert tokenizer.text.endswith("<|im_start|>assistant\n<think>\n\n</think>\n\n")

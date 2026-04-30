@@ -23,6 +23,7 @@ def manual_prompt_inputs(
     prompt: str,
     spec: QwenImageSpec,
     add_generation_prompt: bool = True,
+    enable_thinking: bool = True,
 ) -> dict[str, torch.Tensor]:
     image_tokens = "<|image_pad|>" * spec.num_image_tokens
     text = (
@@ -30,7 +31,11 @@ def manual_prompt_inputs(
         f"<|vision_start|>{image_tokens}<|vision_end|>{prompt}<|im_end|>\n"
     )
     if add_generation_prompt:
-        text += "<|im_start|>assistant\n<think>\n"
+        text += "<|im_start|>assistant\n"
+        if enable_thinking:
+            text += "<think>\n"
+        else:
+            text += "<think>\n\n</think>\n\n"
     encoded = tokenizer(text, return_tensors="pt", add_special_tokens=False)  # type: ignore[operator]
     input_ids = encoded["input_ids"]
     attention_mask = encoded.get("attention_mask", torch.ones_like(input_ids))
@@ -63,6 +68,7 @@ def native_processor_inputs(
     image: Image.Image,
     spec: QwenImageSpec,
     add_generation_prompt: bool = True,
+    enable_thinking: bool = True,
 ) -> dict[str, torch.Tensor]:
     if not hasattr(processor, "apply_chat_template"):
         raise TypeError("Native validation requires a multimodal processor with apply_chat_template.")
@@ -70,6 +76,7 @@ def native_processor_inputs(
         make_messages(prompt, image),
         tokenize=True,
         add_generation_prompt=add_generation_prompt,
+        enable_thinking=enable_thinking,
         return_dict=True,
         return_tensors="pt",
         processor_kwargs={

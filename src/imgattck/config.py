@@ -21,6 +21,7 @@ class ModelConfig:
 class PromptConfig:
     text: str = "Describe the image."
     add_generation_prompt: bool = True
+    enable_thinking: bool = True
 
 
 @dataclass

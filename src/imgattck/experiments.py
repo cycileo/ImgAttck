@@ -57,6 +57,7 @@ def optimize_pixels(config_path: str | Path) -> Path:
             config.prompt.text,
             spec,
             add_generation_prompt=config.prompt.add_generation_prompt,
+            enable_thinking=config.prompt.enable_thinking,
         ),
         bundle.device,
     )
@@ -122,6 +123,7 @@ def validate_native_image(
         image,
         spec,
         add_generation_prompt=config.prompt.add_generation_prompt,
+        enable_thinking=config.prompt.enable_thinking,
     )
     batch = move_batch(batch, bundle.device)
     with torch.no_grad():
@@ -153,6 +155,7 @@ def optimize_latent(config_path: str | Path) -> Path:
             config.prompt.text,
             spec,
             add_generation_prompt=config.prompt.add_generation_prompt,
+            enable_thinking=config.prompt.enable_thinking,
         ),
         bundle.device,
     )

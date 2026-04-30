@@ -37,6 +37,9 @@ Start from [configs/default.yaml](configs/default.yaml). Important knobs:
 
 - `target_strings`: strings whose next-token probability should increase. Each
   must encode to exactly one tokenizer token.
+- `prompt.enable_thinking`: keep `true` to optimize the first reasoning token,
+  or set `false` to use Qwen's empty `<think></think>` block and optimize the
+  first answer token.
 - `image`: fixed differentiable preprocessing shape. Keep dimensions divisible
   by `patch_size * merge_size`. Native validation passes matching
   `min_pixels`/`max_pixels` to the official processor so it uses the same grid.
