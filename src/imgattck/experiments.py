@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -8,8 +9,8 @@ from PIL import Image
 from tqdm import tqdm
 
 from imgattck.artifacts import create_run_dir, snapshot_config, write_csv, write_json
-from imgattck.config import ExperimentConfig, load_config, to_dict
-from imgattck.images import initial_image_tensor, make_pil_image, save_rgb_tensor
+from imgattck.config import ExperimentConfig, experiment_model_configs, load_config, to_dict
+from imgattck.images import initial_image_tensor, save_rgb_tensor
 from imgattck.losses import target_probability_loss, topk_tokens
 from imgattck.modeling import (
     image_features,
@@ -26,17 +27,23 @@ from imgattck.preprocess import (
     total_variation,
     validate_spec,
 )
-from imgattck.prompting import get_tokenizer, manual_prompt_inputs, move_batch, native_processor_inputs
+from imgattck.prompting import manual_prompt_inputs, move_batch, native_processor_inputs
 from imgattck.tokens import check_target_strings, require_single_token_targets, token_report
+
+
+@dataclass
+class OptimizationContext:
+    label: str
+    bundle: Any
+    target_ids: list[int]
+    base_inputs: dict[str, torch.Tensor]
 
 
 def check_tokens(config_path: str | Path) -> Path:
     config = load_config(config_path)
-    tokenizer = load_tokenizer(config.model)
-    checks = check_target_strings(tokenizer, config.target_strings)
     run_dir = create_run_dir(config, "check-tokens")
     snapshot_config(run_dir, config)
-    write_json(run_dir / "token_report.json", token_report(checks))
+    write_json(run_dir / "token_report.json", _token_reports(config))
     return run_dir
 
 
@@ -44,67 +51,91 @@ def optimize_pixels(config_path: str | Path) -> Path:
     config = load_config(config_path)
     spec = spec_from_config(config.image)
     validate_spec(spec)
-    bundle = load_model_bundle(config.model)
-    target_ids = require_single_token_targets(bundle.tokenizer, config.target_strings)
+    contexts = _optimization_contexts(config, spec)
 
     run_dir = create_run_dir(config, "pixel")
     snapshot_config(run_dir, config)
-    write_json(run_dir / "token_report.json", token_report(check_target_strings(bundle.tokenizer, config.target_strings)))
+    write_json(run_dir / "token_report.json", _token_reports_from_contexts(config, contexts))
 
-    base_inputs = move_batch(
-        manual_prompt_inputs(
-            bundle.tokenizer,
-            config.prompt.text,
-            spec,
-            add_generation_prompt=config.prompt.add_generation_prompt,
-            enable_thinking=config.prompt.enable_thinking,
-        ),
-        bundle.device,
-    )
     init_image = initial_image_tensor(
         config.optimization.init, spec, config.optimization.seed, config.optimization.init_image
-    ).to(bundle.device)
+    ).to(contexts[0].bundle.device)
     parameter = torch.nn.Parameter(rgb_to_image_parameter(init_image))
     optimizer = torch.optim.Adam([parameter], lr=config.optimization.lr)
 
     rows: list[dict[str, Any]] = []
+    stopped_early = False
+    stop_reason = None
     progress = tqdm(range(config.optimization.steps), desc="Optimizing pixels")
     for step in progress:
         optimizer.zero_grad(set_to_none=True)
-        image = image_parameter_to_rgb(parameter)
-        processed = differentiable_qwen_preprocess(image, spec)
-        batch = dict(base_inputs)
-        batch["pixel_values"] = processed.pixel_values
-        batch["image_grid_thw"] = processed.image_grid_thw
-        logits = next_token_logits(bundle.model, batch)
-        loss, metrics = target_probability_loss(logits, target_ids)
-        reg_loss = _regularization_loss(image, init_image, config)
-        total_loss = loss + reg_loss
-        total_loss.backward()
-        optimizer.step()
+        model_rows: list[dict[str, Any]] = []
+        data_loss_value = 0.0
+        data_target_probability = 0.0
+        for context in contexts:
+            image = image_parameter_to_rgb(parameter).to(context.bundle.device)
+            processed = differentiable_qwen_preprocess(image, spec)
+            batch = dict(context.base_inputs)
+            batch["pixel_values"] = processed.pixel_values
+            batch["image_grid_thw"] = processed.image_grid_thw
+            logits = next_token_logits(context.bundle.model, batch)
+            loss, metrics = target_probability_loss(logits, context.target_ids)
+            (loss / len(contexts)).backward()
+            data_loss_value += metrics.loss / len(contexts)
+            data_target_probability += metrics.target_probability / len(contexts)
+            model_rows.append({"model": context.label, **metrics.__dict__})
 
-        if step == 0 or (step + 1) % config.optimization.log_every == 0 or step + 1 == config.optimization.steps:
-            row = {"step": step + 1, **metrics.__dict__, "regularization_loss": float(reg_loss.detach().cpu())}
+        image = image_parameter_to_rgb(parameter)
+        reg_loss = _regularization_loss(image, init_image, config)
+        if reg_loss.requires_grad:
+            reg_loss.backward()
+        total_loss_value = data_loss_value + float(reg_loss.detach().cpu())
+
+        should_log = step == 0 or (step + 1) % config.optimization.log_every == 0 or step + 1 == config.optimization.steps
+        should_stop = total_loss_value <= config.optimization.early_stop_loss
+        if should_log or should_stop:
+            row = {
+                "step": step + 1,
+                "loss": total_loss_value,
+                "target_loss": data_loss_value,
+                "target_probability": data_target_probability,
+                "regularization_loss": float(reg_loss.detach().cpu()),
+                "stopped_early": should_stop,
+            }
             rows.append(row)
-            progress.set_postfix(target_probability=f"{metrics.target_probability:.4g}", loss=f"{metrics.loss:.4g}")
+            write_json(run_dir / f"step_{step + 1:05d}_models.json", model_rows)
+            progress.set_postfix(target_probability=f"{data_target_probability:.4g}", loss=f"{total_loss_value:.4g}")
+        if should_stop:
+            stopped_early = True
+            stop_reason = f"loss <= early_stop_loss ({config.optimization.early_stop_loss})"
+            break
+        optimizer.step()
 
     final_image = image_parameter_to_rgb(parameter).detach()
     final_path = run_dir / "optimized.png"
     save_rgb_tensor(final_image, final_path)
     write_csv(run_dir / "metrics.csv", rows)
     write_json(run_dir / "metrics.json", rows)
-    native = validate_native_image(config, final_path, run_dir=run_dir, bundle=bundle)
-    write_json(run_dir / "summary.json", {"final_image": str(final_path), "native_validation": native})
+    native = validate_native_image(config, final_path, run_dir=run_dir, bundles=[context.bundle for context in contexts])
+    write_json(
+        run_dir / "summary.json",
+        {
+            "final_image": str(final_path),
+            "stopped_early": stopped_early,
+            "stop_reason": stop_reason,
+            "native_validation": native,
+        },
+    )
     return run_dir
 
 
 def validate_native(config_path: str | Path, image_path: str | Path) -> Path:
     config = load_config(config_path)
-    bundle = load_model_bundle(config.model)
+    bundles = [load_model_bundle(model_config) for model_config in experiment_model_configs(config)]
     run_dir = create_run_dir(config, "native")
     snapshot_config(run_dir, config)
-    write_json(run_dir / "token_report.json", token_report(check_target_strings(bundle.tokenizer, config.target_strings)))
-    validate_native_image(config, image_path, run_dir=run_dir, bundle=bundle)
+    write_json(run_dir / "token_report.json", _token_reports_from_bundles(config, bundles))
+    validate_native_image(config, image_path, run_dir=run_dir, bundles=bundles)
     return run_dir
 
 
@@ -112,37 +143,43 @@ def validate_native_image(
     config: ExperimentConfig,
     image_path: str | Path,
     run_dir: Path,
-    bundle: Any,
+    bundles: list[Any],
 ) -> dict[str, Any]:
-    target_ids = require_single_token_targets(bundle.tokenizer, config.target_strings)
     image = Image.open(image_path).convert("RGB")
     spec = spec_from_config(config.image)
-    batch = native_processor_inputs(
-        bundle.processor,
-        config.prompt.text,
-        image,
-        spec,
-        add_generation_prompt=config.prompt.add_generation_prompt,
-        enable_thinking=config.prompt.enable_thinking,
-    )
-    batch = move_batch(batch, bundle.device)
-    with torch.no_grad():
-        logits = next_token_logits(bundle.model, batch)
-        _, metrics = target_probability_loss(logits, target_ids)
-    result = {
-        "image": str(image_path),
-        "metrics": metrics.__dict__,
-        "top_tokens": topk_tokens(logits, bundle.tokenizer),
-    }
+    model_results = []
+    for bundle in bundles:
+        target_ids = require_single_token_targets(bundle.tokenizer, config.target_strings)
+        batch = native_processor_inputs(
+            bundle.processor,
+            config.prompt.text,
+            image,
+            spec,
+            add_generation_prompt=config.prompt.add_generation_prompt,
+            enable_thinking=config.prompt.enable_thinking,
+        )
+        batch = move_batch(batch, bundle.device)
+        with torch.no_grad():
+            logits = next_token_logits(bundle.model, batch)
+            _, metrics = target_probability_loss(logits, target_ids)
+        model_results.append(
+            {
+                "model": bundle.model.config.name_or_path,
+                "metrics": metrics.__dict__,
+                "top_tokens": topk_tokens(logits, bundle.tokenizer),
+            }
+        )
+    result = {"image": str(image_path), "models": model_results}
     write_json(run_dir / "native_validation.json", result)
     return result
 
 
 def optimize_latent(config_path: str | Path) -> Path:
     config = load_config(config_path)
+    _require_single_experiment_model(config, "optimize-latent")
     spec = spec_from_config(config.image)
     validate_spec(spec)
-    bundle = load_model_bundle(config.model)
+    bundle = load_model_bundle(experiment_model_configs(config)[0])
     target_ids = require_single_token_targets(bundle.tokenizer, config.target_strings)
 
     run_dir = create_run_dir(config, "latent")
@@ -169,6 +206,8 @@ def optimize_latent(config_path: str | Path) -> Path:
     optimizer = torch.optim.Adam([latent], lr=config.optimization.lr)
 
     rows: list[dict[str, Any]] = []
+    stopped_early = False
+    stop_reason = None
     progress = tqdm(range(config.optimization.steps), desc="Optimizing latent")
     for step in progress:
         optimizer.zero_grad(set_to_none=True)
@@ -181,11 +220,18 @@ def optimize_latent(config_path: str | Path) -> Path:
             image_embeds=latent,
         )
         loss, metrics = target_probability_loss(logits, target_ids)
-        loss.backward()
-        optimizer.step()
-        if step == 0 or (step + 1) % config.optimization.log_every == 0 or step + 1 == config.optimization.steps:
-            rows.append({"step": step + 1, **metrics.__dict__})
+        should_stop = metrics.loss <= config.optimization.early_stop_loss
+        if not should_stop:
+            loss.backward()
+            optimizer.step()
+        should_log = step == 0 or (step + 1) % config.optimization.log_every == 0 or step + 1 == config.optimization.steps
+        if should_log or should_stop:
+            rows.append({"step": step + 1, **metrics.__dict__, "stopped_early": should_stop})
             progress.set_postfix(target_probability=f"{metrics.target_probability:.4g}", loss=f"{metrics.loss:.4g}")
+        if should_stop:
+            stopped_early = True
+            stop_reason = f"loss <= early_stop_loss ({config.optimization.early_stop_loss})"
+            break
 
     torch.save(
         {
@@ -197,14 +243,16 @@ def optimize_latent(config_path: str | Path) -> Path:
     )
     write_csv(run_dir / "metrics.csv", rows)
     write_json(run_dir / "metrics.json", rows)
+    write_json(run_dir / "summary.json", {"stopped_early": stopped_early, "stop_reason": stop_reason})
     return run_dir
 
 
 def invert_latent(config_path: str | Path, latent_path: str | Path) -> Path:
     config = load_config(config_path)
+    _require_single_experiment_model(config, "invert-latent")
     spec = spec_from_config(config.image)
     validate_spec(spec)
-    bundle = load_model_bundle(config.model)
+    bundle = load_model_bundle(experiment_model_configs(config)[0])
 
     checkpoint = torch.load(latent_path, map_location="cpu")
     target_latent = checkpoint["latent"].to(bundle.device)
@@ -219,6 +267,8 @@ def invert_latent(config_path: str | Path, latent_path: str | Path) -> Path:
     optimizer = torch.optim.Adam([parameter], lr=config.optimization.lr)
 
     rows: list[dict[str, Any]] = []
+    stopped_early = False
+    stop_reason = None
     progress = tqdm(range(config.optimization.steps), desc="Inverting latent")
     for step in progress:
         optimizer.zero_grad(set_to_none=True)
@@ -228,26 +278,43 @@ def invert_latent(config_path: str | Path, latent_path: str | Path) -> Path:
         feature_loss = torch.nn.functional.mse_loss(current_latent.float(), target_latent.float())
         reg_loss = _regularization_loss(image, init_image, config)
         loss = config.optimization.latent_match_weight * feature_loss + reg_loss
-        loss.backward()
-        optimizer.step()
-        if step == 0 or (step + 1) % config.optimization.log_every == 0 or step + 1 == config.optimization.steps:
+        loss_value = float(loss.detach().cpu())
+        should_stop = loss_value <= config.optimization.early_stop_loss
+        if not should_stop:
+            loss.backward()
+            optimizer.step()
+        should_log = step == 0 or (step + 1) % config.optimization.log_every == 0 or step + 1 == config.optimization.steps
+        if should_log or should_stop:
             rows.append(
                 {
                     "step": step + 1,
-                    "loss": float(loss.detach().cpu()),
+                    "loss": loss_value,
                     "feature_loss": float(feature_loss.detach().cpu()),
                     "regularization_loss": float(reg_loss.detach().cpu()),
+                    "stopped_early": should_stop,
                 }
             )
             progress.set_postfix(feature_loss=f"{float(feature_loss.detach().cpu()):.4g}")
+        if should_stop:
+            stopped_early = True
+            stop_reason = f"loss <= early_stop_loss ({config.optimization.early_stop_loss})"
+            break
 
     final_image = image_parameter_to_rgb(parameter).detach()
     final_path = run_dir / "inverted.png"
     save_rgb_tensor(final_image, final_path)
     write_csv(run_dir / "metrics.csv", rows)
     write_json(run_dir / "metrics.json", rows)
-    native = validate_native_image(config, final_path, run_dir=run_dir, bundle=bundle)
-    write_json(run_dir / "summary.json", {"final_image": str(final_path), "native_validation": native})
+    native = validate_native_image(config, final_path, run_dir=run_dir, bundles=[bundle])
+    write_json(
+        run_dir / "summary.json",
+        {
+            "final_image": str(final_path),
+            "stopped_early": stopped_early,
+            "stop_reason": stop_reason,
+            "native_validation": native,
+        },
+    )
     return run_dir
 
 
@@ -258,3 +325,79 @@ def _regularization_loss(image: torch.Tensor, init_image: torch.Tensor, config: 
     if config.optimization.l2_weight:
         loss = loss + config.optimization.l2_weight * torch.nn.functional.mse_loss(image, init_image)
     return loss
+
+
+def _optimization_contexts(config: ExperimentConfig, spec: Any) -> list[OptimizationContext]:
+    contexts = []
+    for index, model_config in enumerate(experiment_model_configs(config)):
+        bundle = load_model_bundle(model_config)
+        target_ids = require_single_token_targets(bundle.tokenizer, config.target_strings)
+        base_inputs = move_batch(
+            manual_prompt_inputs(
+                bundle.tokenizer,
+                config.prompt.text,
+                spec,
+                add_generation_prompt=config.prompt.add_generation_prompt,
+                enable_thinking=config.prompt.enable_thinking,
+            ),
+            bundle.device,
+        )
+        contexts.append(
+            OptimizationContext(
+                label=_model_label(model_config.name, index),
+                bundle=bundle,
+                target_ids=target_ids,
+                base_inputs=base_inputs,
+            )
+        )
+    return contexts
+
+
+def _token_reports(config: ExperimentConfig) -> dict[str, Any]:
+    reports = []
+    for index, model_config in enumerate(experiment_model_configs(config)):
+        tokenizer = load_tokenizer(model_config)
+        reports.append(
+            {
+                "model": _model_label(model_config.name, index),
+                "targets": token_report(check_target_strings(tokenizer, config.target_strings)),
+            }
+        )
+    return {"models": reports}
+
+
+def _token_reports_from_contexts(config: ExperimentConfig, contexts: list[OptimizationContext]) -> dict[str, Any]:
+    return {
+        "models": [
+            {
+                "model": context.label,
+                "targets": token_report(check_target_strings(context.bundle.tokenizer, config.target_strings)),
+            }
+            for context in contexts
+        ]
+    }
+
+
+def _token_reports_from_bundles(config: ExperimentConfig, bundles: list[Any]) -> dict[str, Any]:
+    return {
+        "models": [
+            {
+                "model": bundle.model.config.name_or_path,
+                "targets": token_report(check_target_strings(bundle.tokenizer, config.target_strings)),
+            }
+            for bundle in bundles
+        ]
+    }
+
+
+def _require_single_experiment_model(config: ExperimentConfig, command: str) -> None:
+    models = experiment_model_configs(config)
+    if len(models) != 1:
+        raise ValueError(
+            f"{command} currently supports exactly one model because visual latent shapes are model-specific; "
+            f"got {len(models)} models."
+        )
+
+
+def _model_label(model_name: str, index: int) -> str:
+    return model_name if index == 0 else f"{model_name}#{index + 1}"

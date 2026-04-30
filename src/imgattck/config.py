@@ -39,6 +39,7 @@ class ImageConfig:
 class OptimizationConfig:
     steps: int = 100
     lr: float = 0.05
+    early_stop_loss: float = 1e-6
     seed: int = 0
     log_every: int = 10
     init: str = "gray"
@@ -76,11 +77,13 @@ class SuccessConfig:
 class EvaluationQuestion:
     text: str
     success_strings: list[str] | None = None
+    target_strings: list[str] | None = None
 
 
 @dataclass
 class ExperimentConfig:
     model: ModelConfig = field(default_factory=ModelConfig)
+    models: list[ModelConfig] = field(default_factory=list)
     prompt: PromptConfig = field(default_factory=PromptConfig)
     image: ImageConfig = field(default_factory=ImageConfig)
     optimization: OptimizationConfig = field(default_factory=OptimizationConfig)
@@ -91,8 +94,9 @@ class ExperimentConfig:
 @dataclass
 class EvaluationConfig:
     models: list[ModelConfig] = field(default_factory=lambda: [ModelConfig()])
-    image: str = "runs/<run>/optimized.png"
+    image: str | None = None
     questions: list[EvaluationQuestion] = field(default_factory=list)
+    target_strings: list[str] = field(default_factory=list)
     image_spec: ImageConfig = field(default_factory=ImageConfig)
     prompt: PromptConfig = field(default_factory=lambda: PromptConfig(text="", enable_thinking=False))
     generation: GenerationConfig = field(default_factory=GenerationConfig)
@@ -108,6 +112,10 @@ def load_config(path: str | Path) -> ExperimentConfig:
     if not isinstance(data, dict):
         raise ValueError(f"Expected a mapping in config file: {path}")
     return _from_dict(ExperimentConfig, data)
+
+
+def experiment_model_configs(config: ExperimentConfig) -> list[ModelConfig]:
+    return config.models if config.models else [config.model]
 
 
 def load_evaluation_config(path: str | Path) -> EvaluationConfig:
@@ -133,8 +141,9 @@ def load_evaluation_config(path: str | Path) -> EvaluationConfig:
 
     return EvaluationConfig(
         models=models,
-        image=data.get("image", EvaluationConfig.image),
+        image=data.get("image"),
         questions=questions,
+        target_strings=_as_string_list(data.get("target_strings") or [], "target_strings"),
         image_spec=_from_dict(ImageConfig, data.get("image_spec", {})),
         prompt=_from_dict(PromptConfig, prompt_data),
         generation=_from_dict(GenerationConfig, data.get("generation", {})),
@@ -161,7 +170,9 @@ def _from_dict(cls: type[T], data: dict[str, Any]) -> T:
             continue
         value = data[name]
         default_value = _default_for(field_info)
-        if is_dataclass(default_value) and isinstance(value, dict):
+        if name == "models":
+            kwargs[name] = [_parse_model_config(item) for item in _as_list(value, name)]
+        elif is_dataclass(default_value) and isinstance(value, dict):
             kwargs[name] = _from_dict(type(default_value), value)
         else:
             kwargs[name] = value
@@ -184,7 +195,12 @@ def _parse_evaluation_question(value: Any) -> EvaluationQuestion:
     if isinstance(value, str):
         return EvaluationQuestion(text=value)
     if isinstance(value, dict):
-        return _from_dict(EvaluationQuestion, value)
+        question = _from_dict(EvaluationQuestion, value)
+        if question.success_strings is not None:
+            question.success_strings = _as_string_list(question.success_strings, "success_strings")
+        if question.target_strings is not None:
+            question.target_strings = _as_string_list(question.target_strings, "target_strings")
+        return question
     raise ValueError(f"Question entries must be strings or mappings, got {type(value).__name__}.")
 
 
@@ -194,6 +210,13 @@ def _as_list(value: Any, field_name: str) -> list[Any]:
     if isinstance(value, (str, dict)):
         return [value]
     raise ValueError(f"{field_name} must be a list, string, or mapping; got {type(value).__name__}.")
+
+
+def _as_string_list(value: Any, field_name: str) -> list[str]:
+    values = _as_list(value, field_name)
+    if not all(isinstance(item, str) for item in values):
+        raise ValueError(f"{field_name} must contain only strings.")
+    return values
 
 
 def _default_for(field_info: Any) -> Any:
