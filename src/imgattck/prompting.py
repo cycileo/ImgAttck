@@ -62,6 +62,48 @@ def make_messages(prompt: str, image: Image.Image) -> list[dict[str, Any]]:
     ]
 
 
+def make_text_messages(prompt: str) -> list[dict[str, Any]]:
+    return [
+        {
+            "role": "user",
+            "content": [
+                {"type": "text", "text": prompt},
+            ],
+        }
+    ]
+
+
+def text_processor_inputs(
+    processor: object,
+    prompt: str,
+    add_generation_prompt: bool = True,
+    enable_thinking: bool = True,
+) -> dict[str, torch.Tensor]:
+    if not hasattr(processor, "apply_chat_template"):
+        raise TypeError("Text-only evaluation requires a processor with apply_chat_template.")
+    template_kwargs: dict[str, Any] = {
+        "tokenize": True,
+        "add_generation_prompt": add_generation_prompt,
+        "enable_thinking": enable_thinking,
+        "return_dict": True,
+        "return_tensors": "pt",
+    }
+    try:
+        inputs = processor.apply_chat_template(  # type: ignore[attr-defined]
+            make_text_messages(prompt),
+            **template_kwargs,
+        )
+    except TypeError as exc:
+        if "enable_thinking" not in str(exc):
+            raise
+        template_kwargs.pop("enable_thinking")
+        inputs = processor.apply_chat_template(  # type: ignore[attr-defined]
+            make_text_messages(prompt),
+            **template_kwargs,
+        )
+    return dict(inputs)
+
+
 def native_processor_inputs(
     processor: object,
     prompt: str,

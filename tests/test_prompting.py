@@ -1,5 +1,5 @@
 from imgattck.preprocess import QwenImageSpec
-from imgattck.prompting import manual_prompt_inputs
+from imgattck.prompting import manual_prompt_inputs, text_processor_inputs
 
 
 class FakeTokenizer:
@@ -40,3 +40,28 @@ def test_manual_prompt_can_disable_reasoning_prefix():
     manual_prompt_inputs(tokenizer, "Describe.", spec, enable_thinking=False)
 
     assert tokenizer.text.endswith("<|im_start|>assistant\n<think>\n\n</think>\n\n")
+
+
+def test_text_processor_inputs_uses_text_only_messages():
+    class RecordingProcessor:
+        messages = None
+        kwargs = None
+
+        def apply_chat_template(self, messages, **kwargs):
+            import torch
+
+            self.messages = messages
+            self.kwargs = kwargs
+            return {
+                "input_ids": torch.tensor([[1, 2, 3]]),
+                "attention_mask": torch.ones((1, 3), dtype=torch.long),
+            }
+
+    processor = RecordingProcessor()
+
+    batch = text_processor_inputs(processor, "Hello", enable_thinking=False)
+
+    assert batch["input_ids"].tolist() == [[1, 2, 3]]
+    assert processor.messages == [{"role": "user", "content": [{"type": "text", "text": "Hello"}]}]
+    assert processor.kwargs["enable_thinking"] is False
+    assert processor.kwargs["return_tensors"] == "pt"
