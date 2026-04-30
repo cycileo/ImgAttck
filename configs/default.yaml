@@ -39,7 +39,7 @@ optimization:
   seed: 0
   log_every: 10
   init: gray
-  init_image: null
+  init_image: assets/120210-F-XN622-001_224x224.png
   tv_weight: 0.0
   l2_weight: 0.0
   latent_match_weight: 1.0
