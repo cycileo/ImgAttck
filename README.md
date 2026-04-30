@@ -27,6 +27,7 @@ uv run imgattck validate-native configs/default.yaml runs/<run>/optimized.png
 uv run imgattck optimize-latent configs/default.yaml
 uv run imgattck invert-latent configs/default.yaml runs/<latent-run>/latent.pt
 uv run imgattck evaluate-image configs/evaluate.yaml
+uv run streamlit run src/imgattck/eval_viewer.py
 ```
 
 Each optimization run writes a config snapshot, token report, metrics JSON/CSV,
@@ -40,21 +41,47 @@ Start from [configs/default.yaml](configs/default.yaml). Important knobs:
 
 - `target_strings`: strings whose next-token probability should increase. Each
   must encode to exactly one tokenizer token.
+- `models`: one or more model configs. Pixel optimization averages the
+  target-token loss across all listed models before each shared image update.
 - `prompt.enable_thinking`: keep `true` to optimize the first reasoning token,
   or set `false` to use Qwen's empty `<think></think>` block and optimize the
   first answer token.
 - `image`: fixed differentiable preprocessing shape. Keep dimensions divisible
   by `patch_size * merge_size`. Native validation passes matching
   `min_pixels`/`max_pixels` to the official processor so it uses the same grid.
-- `optimization`: steps, learning rate, initialization, and optional TV/L2 image
-  regularizers.
-- `model.device` / `model.device_map`: use a GPU-capable environment for full
+- `optimization`: steps, learning rate, `early_stop_loss`, initialization, and
+  optional TV/L2 image regularizers.
+- `models[].device` / `models[].device_map`: use a GPU-capable environment for full
   4B optimization.
 
+For multiple optimization models:
+
+```yaml
+models:
+  - name: Qwen/Qwen3.5-4B
+    device: auto
+  - name: /path/to/another/local/vlm
+    device: auto
+```
+
+Latent optimization and latent inversion currently require exactly one model,
+because the optimized visual latent shape is model-specific.
+
 Use [configs/evaluate.yaml](configs/evaluate.yaml) to test an optimized image
-across multiple models and questions. The evaluator generates one answer per
-model/question pair and marks it successful when the answer matches either the
-global `success.strings` or a question-specific `success_strings` override.
+across multiple models and questions. The evaluator now runs each question
+twice: once without an image and once with the optimized image. It records both
+answers, success flags, and the before/after logits and probabilities for the
+single-token `target_strings`. Question-level `target_strings` override the
+global list; if no target strings are configured, the evaluator falls back to
+the success strings. If `image` is omitted in the evaluation config, it
+automatically uses `optimized.png` from the newest `output.root/pixel-*` run.
+
+The Streamlit viewer opens the latest `runs/eval-*` directory by default and
+shows the image, summary, answers, and target-token comparison tables:
+
+```bash
+uv run streamlit run src/imgattck/eval_viewer.py
+```
 
 ## Tests
 
