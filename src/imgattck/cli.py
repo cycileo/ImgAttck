@@ -3,6 +3,7 @@ from __future__ import annotations
 import argparse
 from pathlib import Path
 
+from imgattck.evaluation import evaluate_image
 from imgattck.experiments import check_tokens, invert_latent, optimize_latent, optimize_pixels, validate_native
 
 
@@ -27,6 +28,9 @@ def main() -> None:
     invert_parser.add_argument("config", type=Path)
     invert_parser.add_argument("latent", type=Path)
 
+    evaluate_parser = subparsers.add_parser("evaluate-image", help="Generate answers and score an optimized image.")
+    evaluate_parser.add_argument("config", type=Path)
+
     args = parser.parse_args()
     if args.command == "check-tokens":
         run_dir = check_tokens(args.config)
@@ -38,6 +42,8 @@ def main() -> None:
         run_dir = optimize_latent(args.config)
     elif args.command == "invert-latent":
         run_dir = invert_latent(args.config, args.latent)
+    elif args.command == "evaluate-image":
+        run_dir = evaluate_image(args.config)
     else:
         parser.error(f"Unknown command: {args.command}")
         return

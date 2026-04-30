@@ -72,18 +72,30 @@ def native_processor_inputs(
 ) -> dict[str, torch.Tensor]:
     if not hasattr(processor, "apply_chat_template"):
         raise TypeError("Native validation requires a multimodal processor with apply_chat_template.")
-    inputs = processor.apply_chat_template(  # type: ignore[attr-defined]
-        make_messages(prompt, image),
-        tokenize=True,
-        add_generation_prompt=add_generation_prompt,
-        enable_thinking=enable_thinking,
-        return_dict=True,
-        return_tensors="pt",
-        processor_kwargs={
+    template_kwargs: dict[str, Any] = {
+        "tokenize": True,
+        "add_generation_prompt": add_generation_prompt,
+        "enable_thinking": enable_thinking,
+        "return_dict": True,
+        "return_tensors": "pt",
+        "processor_kwargs": {
             "min_pixels": spec.height * spec.width,
             "max_pixels": spec.height * spec.width,
         },
-    )
+    }
+    try:
+        inputs = processor.apply_chat_template(  # type: ignore[attr-defined]
+            make_messages(prompt, image),
+            **template_kwargs,
+        )
+    except TypeError as exc:
+        if "enable_thinking" not in str(exc):
+            raise
+        template_kwargs.pop("enable_thinking")
+        inputs = processor.apply_chat_template(  # type: ignore[attr-defined]
+            make_messages(prompt, image),
+            **template_kwargs,
+        )
     batch = dict(inputs)
     tokenizer = get_tokenizer(processor)
     if "mm_token_type_ids" not in batch:

@@ -26,10 +26,13 @@ uv run imgattck optimize-pixels configs/default.yaml
 uv run imgattck validate-native configs/default.yaml runs/<run>/optimized.png
 uv run imgattck optimize-latent configs/default.yaml
 uv run imgattck invert-latent configs/default.yaml runs/<latent-run>/latent.pt
+uv run imgattck evaluate-image configs/evaluate.yaml
 ```
 
 Each optimization run writes a config snapshot, token report, metrics JSON/CSV,
 the final image or latent, and native validation results where applicable.
+Evaluation runs write generated answers plus success summaries to
+`results.json`, `results.csv`, and `summary.json`.
 
 ## Config
 
@@ -47,6 +50,11 @@ Start from [configs/default.yaml](configs/default.yaml). Important knobs:
   regularizers.
 - `model.device` / `model.device_map`: use a GPU-capable environment for full
   4B optimization.
+
+Use [configs/evaluate.yaml](configs/evaluate.yaml) to test an optimized image
+across multiple models and questions. The evaluator generates one answer per
+model/question pair and marks it successful when the answer matches either the
+global `success.strings` or a question-specific `success_strings` override.
 
 ## Tests
 
