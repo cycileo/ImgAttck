@@ -1,0 +1,40 @@
+model:
+  name: Qwen/Qwen3.5-4B
+  dtype: auto
+  device: auto
+  device_map: null
+  local_files_only: false
+  trust_remote_code: false
+
+prompt:
+  text: "Describe the image."
+  add_generation_prompt: true
+
+image:
+  height: 224
+  width: 224
+  patch_size: 16
+  temporal_patch_size: 2
+  merge_size: 2
+  mean: [0.5, 0.5, 0.5]
+  std: [0.5, 0.5, 0.5]
+
+optimization:
+  steps: 100
+  lr: 0.05
+  seed: 0
+  log_every: 10
+  init: gray
+  init_image: null
+  tv_weight: 0.0
+  l2_weight: 0.0
+  latent_match_weight: 1.0
+
+output:
+  root: runs
+  name: null
+
+target_strings:
+  - " yes"
+  - " Yes"
+  - " YES"
