@@ -41,8 +41,12 @@ Start from [configs/default.yaml](configs/default.yaml). Important knobs:
 
 - `target_strings`: strings whose next-token probability should increase. Each
   must encode to exactly one tokenizer token.
+- `prompts`: optional list of prompt strings or prompt mappings. If omitted,
+  the single `prompt` block is used as before. Shared settings from `prompt`
+  are inherited by string entries and can be overridden per prompt.
 - `models`: one or more model configs. Pixel optimization averages the
-  target-token loss across all listed models before each shared image update.
+  target-token loss across all listed models and prompts before each shared
+  image update.
 - `prompt.enable_thinking`: keep `true` to optimize the first reasoning token,
   or set `false` to use Qwen's empty `<think></think>` block and optimize the
   first answer token.
@@ -63,6 +67,22 @@ models:
   - name: /path/to/another/local/vlm
     device: auto
 ```
+
+For multiple optimization prompts:
+
+```yaml
+prompt:
+  add_generation_prompt: true
+  enable_thinking: false
+
+prompts:
+  - "Describe the image."
+  - text: "Answer the question using only one word."
+    enable_thinking: true
+```
+
+The optimization objective is averaged across every model/prompt pair. Runtime
+therefore scales roughly with `len(models) * len(prompts)`.
 
 Latent optimization and latent inversion currently require exactly one model,
 because the optimized visual latent shape is model-specific.

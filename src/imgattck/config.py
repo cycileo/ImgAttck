@@ -1,6 +1,6 @@
 from __future__ import annotations
 
-from dataclasses import MISSING, asdict, dataclass, field, fields, is_dataclass
+from dataclasses import MISSING, asdict, dataclass, field, fields, is_dataclass, replace
 from pathlib import Path
 from typing import Any, TypeVar
 
@@ -85,6 +85,7 @@ class ExperimentConfig:
     model: ModelConfig = field(default_factory=ModelConfig)
     models: list[ModelConfig] = field(default_factory=list)
     prompt: PromptConfig = field(default_factory=PromptConfig)
+    prompts: list[PromptConfig] = field(default_factory=list)
     image: ImageConfig = field(default_factory=ImageConfig)
     optimization: OptimizationConfig = field(default_factory=OptimizationConfig)
     output: OutputConfig = field(default_factory=OutputConfig)
@@ -116,6 +117,10 @@ def load_config(path: str | Path) -> ExperimentConfig:
 
 def experiment_model_configs(config: ExperimentConfig) -> list[ModelConfig]:
     return config.models if config.models else [config.model]
+
+
+def experiment_prompt_configs(config: ExperimentConfig) -> list[PromptConfig]:
+    return config.prompts if config.prompts else [config.prompt]
 
 
 def load_evaluation_config(path: str | Path) -> EvaluationConfig:
@@ -172,6 +177,11 @@ def _from_dict(cls: type[T], data: dict[str, Any]) -> T:
         default_value = _default_for(field_info)
         if name == "models":
             kwargs[name] = [_parse_model_config(item) for item in _as_list(value, name)]
+        elif name == "prompt":
+            kwargs[name] = _parse_prompt_config(value)
+        elif name == "prompts":
+            base_prompt = kwargs.get("prompt", PromptConfig())
+            kwargs[name] = [_parse_prompt_config(item, base_prompt) for item in _as_list(value, name)]
         elif is_dataclass(default_value) and isinstance(value, dict):
             kwargs[name] = _from_dict(type(default_value), value)
         else:
@@ -189,6 +199,16 @@ def _parse_model_config(value: Any) -> ModelConfig:
     if isinstance(value, dict):
         return _from_dict(ModelConfig, value)
     raise ValueError(f"Model entries must be strings or mappings, got {type(value).__name__}.")
+
+
+def _parse_prompt_config(value: Any, defaults: PromptConfig | None = None) -> PromptConfig:
+    base = defaults or PromptConfig()
+    if isinstance(value, str):
+        return replace(base, text=value)
+    if isinstance(value, dict):
+        data = to_dict(base) | value
+        return _from_dict(PromptConfig, data)
+    raise ValueError(f"Prompt entries must be strings or mappings, got {type(value).__name__}.")
 
 
 def _parse_evaluation_question(value: Any) -> EvaluationQuestion:
